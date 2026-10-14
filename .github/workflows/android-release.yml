@@ -1,24 +1,12 @@
-name: Android Multi-App Build & Release
+name: Android Multi-App Build
 
 on:
   workflow_dispatch:
-    inputs:
-      build-type:
-        description: 'Build Type'
-        type: choice
-        options:
-          - debug
-          - release
-        default: debug
-        required: true
 
 jobs:
-  build-and-release:
-    name: Build and Release Apps
+  build-and-debug:
+    name: Build Debug Apps
     runs-on: ubuntu-latest
-
-    env:
-      BUILD_TYPE: ${{ github.event.inputs.build-type || 'release' }}
 
     steps:
       - name: Checkout Code
@@ -42,38 +30,40 @@ jobs:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
           cache-disabled: false
 
-      - name: Decode Keystore
-        if: ${{ github.event.inputs.build-type == 'release' || env.BUILD_TYPE == 'release' }}
+      # -------------------------------------------------------------
+      # 추가된 핵심 단계: 임시 Keystore 생성 및 복사
+      # Gradle의 Configuration 단계를 통과하기 위해 요구하는 위치에 가짜 서명 파일을 만들어 줍니다.
+      # -------------------------------------------------------------
+      - name: Generate Dummy Keystore
         run: |
-          echo "${{ secrets.SIGNING_KEY }}" | base64 -d > release.jks
+          # 1. 루트 폴더에 release.jks 생성
+          keytool -genkey -v -keystore release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias dummyalias -storepass dummypass -keypass dummypass -dname "CN=Dummy,O=Dummy,C=US"
+          
+          # 2. 에러 로그에서 요구했던 spotify-music 폴더 안에 파일 복사 (없으면 폴더 생성)
+          mkdir -p spotify-music
+          cp release.jks spotify-music/release.jks
 
-      - name: Build APKs with Caching
-        run: |
-          if [ "$BUILD_TYPE" = "release" ]; then
-            ./gradlew assembleRelease --build-cache
-          else
-            ./gradlew assembleDebug --build-cache
-          fi
+      - name: Build Debug APK with Caching
+        # 릴리즈가 아닌 디버그용으로 빌드합니다.
+        run: ./gradlew assembleDebug --build-cache
+        # 빌드 스크립트가 환경변수로 서명 정보를 읽어올 경우 에러가 나지 않도록 가짜 정보를 줍니다.
         env:
-          RELEASE_STORE_FILE: ../release.jks
-          RELEASE_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          RELEASE_STORE_PASSWORD: dummypass
+          RELEASE_KEY_ALIAS: dummyalias
+          RELEASE_KEY_PASSWORD: dummypass
 
       - name: Collect APKs to flat directory
         run: |
           mkdir -p collected-apks
-
-          # 复制所有 APK 文件
-          find . -name "*.apk" -path "*/build/outputs/apk/${{ env.BUILD_TYPE }}/*" -exec cp {} collected-apks/ \;
-
+          # debug 빌드 결과물 경로로 찾도록 변경
+          find . -name "*.apk" -path "*/build/outputs/apk/debug/*" -exec cp {} collected-apks/ \;
           echo "Collected files:"
           ls -lh collected-apks/
 
       - name: Upload APKs to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.BUILD_TYPE }}-apks
+          name: debug-apks
           path: collected-apks/
           if-no-files-found: error
           archive: false
@@ -82,4 +72,5 @@ jobs:
         if: always()
         run: |
           rm -f release.jks || true
+          rm -f spotify-music/release.jks || true
           rm -rf collected-apks || true
